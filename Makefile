@@ -8,7 +8,7 @@ pep8:
 
 .PHONY: test
 test: pep8
-	@py.test -s -vv --cov --cov-config=.coveragerc
+	@py.test -s -vv --cov --cov-config=.coveragerc tests/
 
 .PHONY: sdist
 sdist: test
