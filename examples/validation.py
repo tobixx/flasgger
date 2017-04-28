@@ -42,6 +42,17 @@ def autovalidation():
     data = request.json
     return jsonify(data)
 
+def test_swag(client, specs_data):
+    """
+    This test is runs automatically in Travis CI
+
+    :param client: Flask app test client
+    :param specs_data: {'url': {swag_specs}} for every spec in app
+    """
+    for url, spec in specs_data.items():
+        print url, spec
+        assert 'GlobalDefinedThing' in spec['definitions']
+
 
 test_specs_1 = {
   "tags": [

@@ -27,7 +27,17 @@ parameters:
           default: ["wizard", "hogwarts", "dead"]
           items:
             type: string
-
+        globals:
+          type: array
+          description: optional list of global defined things
+          items:
+            $ref: '#/definitions/GlobalDefinedThing'
+definitions:
+  GlobalDefinedThing:
+    type: object
+    properties:
+      someProperty:
+        type: string
 responses:
   200:
     description: A single user item
