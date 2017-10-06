@@ -3,6 +3,37 @@ Changelog
 
 These are all the changes in Flasgger since the 0.6.0 release
 
+0.8.0
+-----
+- Reverted the automatic set of json_encoder and allowed user to import LAzyJSONEncoder  (tks @SBillion)
+
+0.7.0
+-----
+- Added support for LazyString https://github.com/rochacbruno/flasgger/issues/158
+
+0.6.6
+-----
+
+- Support custom validation functions
+- (TODO) Allow the caller to handle validation exceptions (solves #122)
+- Swagger::get_schema method to get defined schemas as python dicts
+- Updated static UI versions from latest github distribution
+- Better test for `import` functionality
+
+0.6.5
+-----
+
+- Suporting for decorating FlasggerViews (to protect with login etc)
+- description and summary are now optional
+- specs_route fix to be customized `/specs_route` to `/anything`
+- enable/disable swagger UI (if you only need specs json)
+- attempt to fix #102 allowing `import:` from subfolders
+
+0.6.4
+-----
+
+- template_file argument added to Swagger class
+
 0.6.3
 -----
 - HOTFIX: Support views using `decorator` package (#80)

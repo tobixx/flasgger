@@ -16,7 +16,7 @@ Flasgger also comes with **[SwaggerUI](http://swagger.io/swagger-ui/) embedded**
 
 Flasgger also **provides validation** of the incoming data, using the same specification it can validates if the data received as as a POST, PUT, PATCH is valid against the schema defined using **YAML**, **Python dictionaries** or **Marshmallow Schemas**.
 
-Flasgger can work with simple function views or MethodViews using docstring for especification, or using `@swag_from` decorator to get specification from **YAML** or **dict** and also provides **SwaggerView** which can use **Marshmallow Schemas**  as specification.
+Flasgger can work with simple function views or MethodViews using docstring as specification, or using `@swag_from` decorator to get specification from **YAML** or **dict** and also provides **SwaggerView** which can use **Marshmallow Schemas**  as specification.
 
 Flasgger is compatible with `Flask-RESTful` so you can use `Resources` and `swag` specifications together, take a look at [restful example.](examples/restful.py)
 
@@ -55,7 +55,7 @@ from flask import Flask, jsonify
 from flasgger import Swagger
 
 app = Flask(__name__)
-Swagger(app)
+swagger = Swagger(app)
 
 @app.route('/colors/<palette>/')
 def colors(palette):
@@ -159,7 +159,7 @@ def colors(palette):
     ...
 ```
 
-If you do not want to use the decorator you can use the docsting `file:` shortcut.
+If you do not want to use the decorator you can use the docstring `file:` shortcut.
 
 ```python
 @app.route('/colors/<palette>/')
@@ -287,7 +287,7 @@ class PaletteView(SwaggerView):
         return jsonify(result)
 
 app = Flask(__name__)
-Swagger(app)
+swagger = Swagger(app)
 
 app.add_url_rule(
     '/colors/<palette>',
@@ -317,7 +317,7 @@ from flask_restful import Api, Resource
 
 app = Flask(__name__)
 api = Api(app)
-Swagger(app)
+swagger = Swagger(app)
 
 class Username(Resource):
     def get(self, username):
@@ -374,23 +374,41 @@ registering the `url_rule` many times. Take a look at `examples/example_app`
 
 # Use the same data to validate your API POST body.
 
-```python
-from flasgger import swag_from, validate
-
-@swag_from('defs.yml')
-def post():
-    validate(request.json, 'UserSchema', 'defs.yml')
-    # if not validate returns ValidationError response with status 400
-    # also returns the validation message.
-```
-
-You can also tell `swag_from` to validate automatically
+Setting `swag_from`'s _validation_ parameter to `True` will validate incoming data automatically:
 
 ```python
 from flasgger import swag_from
 
 @swag_from('defs.yml', validation=True)
 def post():
+    # if not validate returns ValidationError response with status 400
+    # also returns the validation message.
+```
+
+Using `swagger.validate` annotation is also possible:
+
+```python
+from flasgger import Swagger
+
+swagger = Swagger(app)
+
+@swagger.validate('UserSchema')
+def post():
+    '''
+    file: defs.yml
+    '''
+    # if not validate returns ValidationError response with status 400
+    # also returns the validation message.
+```
+
+Yet you can call `validate` manually:
+
+```python
+from flasgger import swag_from, validate
+
+@swag_from('defs.yml')
+def post():
+    validate(request.json, 'UserSchema', 'defs.yml')
     # if not validate returns ValidationError response with status 400
     # also returns the validation message.
 ```
@@ -402,23 +420,179 @@ Take a look at `examples/validation.py` for more information.
 
 All validation options can be found at http://json-schema.org/latest/json-schema-validation.html
 
+### Custom validation
+
+By default Flasgger will use [python-jsonschema](https://python-jsonschema.readthedocs.io/en/latest/)
+to perform validation.
+
+Custom validation functions are supported as long as they meet the requirements:
+ - take two, and only two, positional arguments:
+    - the data to be validated as the first; and
+    - the schema to validate against as the second argument
+ - raise any kind of exception when validation fails.
+
+Any return value is discarded.
+
+
+Providing the function to the Swagger instance will make it the default:
+
+```python
+from flasgger import Swagger
+
+swagger = Swagger(app, validation_function=my_validation_function)
+```
+
+Providing the function as parameter of `swag_from` or `swagger.validate`
+annotations or directly to the `validate` function will force it's use
+over the default validation function for Swagger:
+
+```python
+from flasgger import swag_from
+
+@swag_from('spec.yml', validation=True, validation_function=my_function)
+...
+```
+
+```python
+from flasgger import Swagger
+
+swagger = Swagger(app)
+
+@swagger.validate('Pet', validation_function=my_function)
+...
+```
+
+```python
+from flasgger import validate
+
+...
+
+    validate(
+        request.json, 'Pet', 'defs.yml', validation_function=my_function)
+```
+
+### Validation Error handling
+
+By default Flasgger will handle validation errors by aborting the
+request with a 400 BAD REQUEST response with the error message.
+
+A custom validation error handling function can be provided to
+supersede default behavior as long as it meets the requirements:
+ - take three, and only three, positional arguments:
+    - the error raised as the first;
+    - the data which failed validation as the second; and
+    - the schema used in to validate as the third argument
+
+
+Providing the function to the Swagger instance will make it the default:
+
+```python
+from flasgger import Swagger
+
+swagger = Swagger(app, validation_error_handler=my_handler)
+```
+
+Providing the function as parameter of `swag_from` or `swagger.validate`
+annotations or directly to the `validate` function will force it's use
+over the default validation function for Swagger:
+
+```python
+from flasgger import swag_from
+
+@swag_from(
+    'spec.yml', validation=True, validation_error_handler=my_handler)
+...
+```
+
+```python
+from flasgger import Swagger
+
+swagger = Swagger(app)
+
+@swagger.validate('Pet', validation_error_handler=my_handler)
+...
+```
+
+```python
+from flasgger import validate
+
+...
+
+    validate(
+        request.json, 'Pet', 'defs.yml',
+        validation_error_handler=my_handler)
+```
+
+Examples of use of a custom validation error handler function can be
+found at [example validation_error_handler.py](examples/validation_error_handler.py)
+
+# Get defined schemas as python dictionaries
+
+You may wish to use schemas you defined in your Swagger specs as dictionaries
+without replicating the specification. For that you can use the `get_schema`
+method:
+
+```python
+from flask import Flask, jsonify
+from flasgger import Swagger, swag_from
+
+app = Flask(__name__)
+swagger = Swagger(app)
+
+@swagger.validate('Product')
+def post():
+    """
+    post endpoint
+    ---
+    tags:
+      - products
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          id: Product
+          required:
+            - name
+          properties:
+            name:
+              type: string
+              description: The product's name.
+              default: "Guarana"
+    responses:
+      200:
+        description: The product inserted in the database
+        schema:
+          $ref: '#/definitions/Product'
+    """
+    rv = db.insert(request.json)
+    return jsonify(rv)
+
+...
+
+product_schema = swagger.get_schema('product')
+```
+
+This method returns a dictionary which contains the Flasgger schema id,
+all defined parameters and a list of required parameters.
+
 # HTML sanitizer
 
 By default Flasgger will try to sanitize the content in YAML definitions
 replacing every ```\n``` with ```<br>``` but you can change this behaviour
 setting another kind of sanitizer.
 
-```
+```python
 from flasgger import Swagger, NO_SANITIZER
 
 app =Flask()
-Swagger(app, sanitizer=NO_SANITIZER)
+swagger = Swagger(app, sanitizer=NO_SANITIZER)
 ```
 
 You can write your own sanitizer
 
-```
-Swagger(app, sanitizer=lambda text: do_anything_with(text))
+```python
+swagger = Swagger(app, sanitizer=lambda text: do_anything_with(text))
 ```
 
 There is also a Markdown parser available, if you want to be able to render
@@ -440,7 +614,7 @@ app.config['SWAGGER'] = {
     'title': 'My API',
     'uiversion': 3
 }
-Swagger(app)
+swagger = Swagger(app)
 
 ```
 
@@ -466,10 +640,8 @@ template = {
   "host": "mysite.com",  # overrides localhost:500
   "basePath": "/api",  # base bash for blueprint registration
   "schemes": [
-    [
-      "http",
-      "https"
-    ]
+    "http",
+    "https"
   ],
   "operationId": "getmyData"
 }
@@ -482,6 +654,63 @@ And then the template is the default data unless some view changes it. You
 can also provide all your specs as template and have no views. Or views in
 external APP.
 
+## Getting default data at runtime
+
+Sometimes you need to get some data at runtime depending on dynamic values ex: you want to check `request.is_secure` to decide if `schemes` will be `https` you can do that by using `LazyString`.
+
+```py
+from flask import Flask
+from flasgger import, Swagger, LazyString, LazyJSONEncoder
+
+app = Flask(__init__)
+
+# Set the custom Encoder (Inherit it if you need to customize)
+app.json_encoder = LazyJSONEncoder
+
+
+template = dict(
+    info={
+        'title': LazyString(lambda: 'Lazy Title'),
+        'version': LazyString(lambda: '99.9.9'),
+        'description': LazyString(lambda: 'Hello Lazy World'),
+        'termsOfService': LazyString(lambda: '/there_is_no_tos')
+    },
+    host=LazyString(lambda: request.host),
+    schemes=[LazyString(lambda: 'https' if request.is_secure else 'http')],
+    foo=LazyString(lambda: "Bar")
+)
+Swagger(app, template=template)
+
+```
+
+The `LazyString` values will be evaluated only when `jsonify` encodes the value at runtime, so you have access to Flask `request, session, g, etc..` and also may want to access a database.
+
+# Customize default configurations
+
+Custom configurations such as a different specs route or disabling Swagger UI can be provided to Flasgger:
+
+```python
+swagger_config = {
+    "headers": [
+    ],
+    "specs": [
+        {
+            "endpoint": 'apispec_1',
+            "route": '/apispec_1.json',
+            "rule_filter": lambda rule: True,  # all in
+            "model_filter": lambda tag: True,  # all in
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    # "static_folder": "static",  # must be set by user
+    "swagger_ui": True,
+    "specs_route": "/apidocs/"
+}
+
+swagger = Swagger(app, config=swagger_config)
+
+```
+
 ## Extracting Definitions
 
 Definitions can be extracted when `id` is found in spec, example:
@@ -491,7 +720,7 @@ from flask import Flask, jsonify
 from flasgger import Swagger
 
 app = Flask(__name__)
-Swagger(app)
+swagger = Swagger(app)
 
 @app.route('/colors/<palette>/')
 def colors(palette):

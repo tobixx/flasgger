@@ -1,5 +1,5 @@
 """
-Example if Flask RESTFul integration.
+Example of Flask RESTFul integration.
 requires: `pip install flask-restful`
 """
 from flask import Flask
@@ -13,7 +13,7 @@ app.config['SWAGGER'] = {
     'title': 'Flasgger RESTful',
     'uiversion': 2
 }
-Swagger(app)
+swag = Swagger(app)
 
 
 TODOS = {
