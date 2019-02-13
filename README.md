@@ -28,9 +28,26 @@ There are some [example applications](examples/) and you can also play with exam
 
 > NOTE: all the examples apps are also test cases and run automatically in Travis CI to ensure quality and coverage.
 
+## Docker
+
+The examples and demo app can also be built and run as a Docker image/container:
+
+```
+docker build -t flasgger .
+docker run -it --rm -p 5000:5000 --name flasgger flasgger
+```
+Then access the Flasgger demo app at http://localhost:5000 .
+
 # Installation
 
 > under your virtualenv do:
+
+Ensure you have latest setuptools
+```
+pip install -U setuptools
+```
+
+then
 
 ```
 pip install flasgger
@@ -187,7 +204,7 @@ specs_dict = {
         "rgb",
         "cmyk"
       ],
-      "required": true,
+      "required": "true",
       "default": "all"
     }
   ],
@@ -349,6 +366,12 @@ api.add_resource(Username, '/username/<username>')
 app.run(debug=True)
 
 ```
+
+## Auto-parsing external YAML docs and `MethodView`s
+
+Flasgger can be configured to auto-parse external YAM API docs.  [Set a `doc_dir`](https://github.com/rochacbruno/flasgger/blob/aaef05c17cc559d01b7436211093463642eb6ae2/examples/parsed_view_func.py#L16) in your `app.config['SWAGGER']` and Swagger will load API docs by looking in `doc_dir` for YAML files stored by endpoint-name and method-name.  For example, `'doc_dir': './examples/docs/'` and a file `./examples/docs/items/get.yml` will provide a Swagger doc for `ItemsView` method `get`.
+
+Additionally, when using **Flask RESTful** per above, by passing `parse=True` when constructing `Swagger`, Flasgger will use  `flask_restful.reqparse.RequestParser`, locate all `MethodView`s and parsed and validated data will be stored in `flask.request.parsed_data`.
 
 ## Handling multiple http methods and routes for a single function
 
@@ -618,6 +641,21 @@ swagger = Swagger(app)
 
 ```
 
+## Externally loading Swagger UI and jQuery JS/CSS
+
+Starting with Flasgger 0.9.2 you can specify external URL locations for loading the JavaScript and CSS for the Swagger and jQuery libraries loaded in the Flasgger default templates.  If the configuration properties below are omitted, Flasgger will serve static versions it includes - these versions may be older than the current Swagger UI v2 or v3 releases.
+
+The following example loads Swagger UI and jQuery versions from unpkg.com:
+
+```
+swagger_config = Swagger.DEFAULT_CONFIG
+swagger_config['swagger_ui_bundle_js'] = '//unpkg.com/swagger-ui-dist@3/swagger-ui-bundle.js'
+swagger_config['swagger_ui_standalone_preset_js'] = '//unpkg.com/swagger-ui-dist@3/swagger-ui-standalone-preset.js'
+swagger_config['jquery_js'] = '//unpkg.com/jquery@2.2.4/dist/jquery.min.js'
+swagger_config['swagger_ui_css'] = '//unpkg.com/swagger-ui-dist@3/swagger-ui.css'
+Swagger(app, config=swagger_config)
+```
+
 # Initializing Flasgger with default data.
 
 You can start your Swagger spec with any default data providing a template:
@@ -684,6 +722,23 @@ Swagger(app, template=template)
 ```
 
 The `LazyString` values will be evaluated only when `jsonify` encodes the value at runtime, so you have access to Flask `request, session, g, etc..` and also may want to access a database.
+
+## Behind a reverse proxy
+
+Sometimes you're serving your swagger docs behind an reverse proxy (e.g. NGINX).  When following the [Flask guidance](http://flask.pocoo.org/snippets/35/),
+the swagger docs will load correctly, but the "Try it Out" button points to the wrong place.  This can be fixed with the following code:
+
+```python
+from flask import Flask, request
+from flask import Swagger, LazyString, LazyJSONEncoder
+
+app = Flask(__name__)
+app.json_encoder = LazyJSONEncoder
+
+template = dict(swaggerUiPrefix=LazyString(lambda : request.environ.get('HTTP_X_SCRIPT_NAME', '')))
+swagger = Swagger(app, template=template)
+
+``` 
 
 # Customize default configurations
 

@@ -14,7 +14,7 @@ try:
     import simplejson as json
 except ImportError:
     import json
-from functools import wraps
+from functools import wraps, partial
 from collections import defaultdict
 from flask import Blueprint
 from flask import Markup
@@ -23,8 +23,15 @@ from flask import jsonify
 from flask import redirect
 from flask import render_template
 from flask import request, url_for
+from flask import abort
+from flask import Response
 from flask.views import MethodView
 from flask.json import JSONEncoder
+try:
+    from flask_restful.reqparse import RequestParser
+except ImportError:
+    RequestParser = None
+import jsonschema
 from mistune import markdown
 from .constants import OPTIONAL_FIELDS
 from .utils import extract_definitions
@@ -34,6 +41,7 @@ from .utils import parse_definition_docstring
 from .utils import get_vendor_extension_fields
 from .utils import validate
 from .utils import LazyString
+from . import __version__
 
 NO_SANITIZER = lambda text: text  # noqa
 BR_SANITIZER = lambda text: text.replace('\n', '<br/>') if text else text  # noqa
@@ -72,6 +80,30 @@ class APIDocsView(MethodView):
             # calling with ?json returns specs
             return jsonify(data)
         else:  # pragma: no cover
+            data['flasgger_config'] = self.config
+            data['json'] = json
+            data['flasgger_version'] = __version__
+            data['favicon'] = self.config.get(
+                'favicon',
+                url_for('flasgger.static', filename='favicon-32x32.png')
+            )
+            data['swagger_ui_bundle_js'] = self.config.get(
+                'swagger_ui_bundle_js',
+                url_for('flasgger.static', filename='swagger-ui-bundle.js')
+            )
+            data['swagger_ui_standalone_preset_js'] = self.config.get(
+                'swagger_ui_standalone_preset_js',
+                url_for('flasgger.static',
+                        filename='swagger-ui-standalone-preset.js')
+            )
+            data['jquery_js'] = self.config.get(
+                'jquery_js',
+                url_for('flasgger.static', filename='lib/jquery.min.js')
+            )
+            data['swagger_ui_css'] = self.config.get(
+                'swagger_ui_css',
+                url_for('flasgger.static', filename='swagger-ui.css')
+            )
             return render_template(
                 'flasgger/index.html',
                 **data
@@ -83,182 +115,14 @@ class APISpecsView(MethodView):
     The /apispec_1.json and other specs
     """
     def __init__(self, *args, **kwargs):
-        view_args = kwargs.pop('view_args', {})
-        self.config = view_args.get('config')
-        self.spec = view_args.get('spec')
-        self.process_doc = view_args.get('sanitizer', BR_SANITIZER)
-        self.template = view_args.get('template')
-        self.definition_models = view_args.get('definition_models')
+        self.loader = kwargs.pop('loader')
         super(APISpecsView, self).__init__(*args, **kwargs)
-
-    def get_url_mappings(self, rule_filter=None):
-        """
-        Returns all werkzeug rules
-        """
-        rule_filter = rule_filter or (lambda rule: True)
-        app_rules = [
-            rule for rule in current_app.url_map.iter_rules()
-            if rule_filter(rule)
-        ]
-        return app_rules
-
-    def get_def_models(self, definition_filter=None):
-        """
-        Used for class based definitions
-        """
-        model_filter = definition_filter or (lambda tag: True)
-        return {
-            definition.name: definition.obj
-            for definition in self.definition_models
-            if model_filter(definition)
-        }
 
     def get(self):
         """
         The Swagger view get method outputs to /apispecs_1.json
         """
-        data = {
-            "swagger": self.config.get('swagger') or self.config.get(
-                'swagger_version', "2.0"
-            ),
-            # try to get from config['SWAGGER']['info']
-            # then config['SWAGGER']['specs'][x]
-            # then config['SWAGGER']
-            # then default
-            "info": self.config.get('info') or {
-                "version": self.spec.get(
-                    'version', self.config.get('version', "0.0.1")
-                ),
-                "title": self.spec.get(
-                    'title', self.config.get('title', "A swagger API")
-                ),
-                "description": self.spec.get(
-                    'description', self.config.get('description',
-                                                   "powered by Flasgger")
-                ),
-                "termsOfService": self.spec.get(
-                    'termsOfService', self.config.get('termsOfService',
-                                                      "/tos")
-                ),
-            },
-            "paths": self.config.get('paths') or defaultdict(dict),
-            "definitions": self.config.get('definitions') or defaultdict(dict)
-        }
-
-        # Support extension properties in the top level config
-        top_level_extension_options = get_vendor_extension_fields(self.config)
-        if top_level_extension_options:
-            data.update(top_level_extension_options)
-
-        # if True schemaa ids will be prefized by function_method_{id}
-        # for backwards compatibility with <= 0.5.14
-        prefix_ids = self.config.get('prefix_ids')
-
-        if self.config.get('host'):
-            data['host'] = self.config.get('host')
-        if self.config.get("basePath"):
-            data["basePath"] = self.config.get('basePath')
-        if self.config.get("securityDefinitions"):
-            data["securityDefinitions"] = self.config.get(
-                'securityDefinitions'
-            )
-        # set defaults from template
-        if self.template is not None:
-            data.update(self.template)
-
-        paths = data['paths']
-        definitions = data['definitions']
-        ignore_verbs = set(
-            self.config.get('ignore_verbs', ("HEAD", "OPTIONS"))
-        )
-
-        # technically only responses is non-optional
-        optional_fields = self.config.get('optional_fields') or OPTIONAL_FIELDS
-
-        for name, def_model in self.get_def_models(
-                self.spec.get('definition_filter')).items():
-            description, swag = parse_definition_docstring(
-                def_model, self.process_doc)
-            if name and swag:
-                if description:
-                    swag.update({'description': description})
-                definitions[name].update(swag)
-
-        specs = get_specs(
-            self.get_url_mappings(self.spec.get('rule_filter')), ignore_verbs,
-            optional_fields, self.process_doc)
-
-        for rule, verbs in specs:
-            operations = dict()
-            for verb, swag in verbs:
-                definitions.update(swag.get('definitions', {}))
-                defs = []  # swag.get('definitions', [])
-                defs += extract_definitions(
-                    defs, endpoint=rule.endpoint, verb=verb,
-                    prefix_ids=prefix_ids
-                )
-
-                params = swag.get('parameters', [])
-                defs += extract_definitions(params,
-                                            endpoint=rule.endpoint,
-                                            verb=verb,
-                                            prefix_ids=prefix_ids)
-
-                responses = None
-                if 'responses' in swag:
-                    responses = swag.get('responses', {})
-                    responses = {
-                        str(key): value
-                        for key, value in responses.items()
-                    }
-                    if responses is not None:
-                        defs = defs + extract_definitions(
-                            responses.values(),
-                            endpoint=rule.endpoint,
-                            verb=verb,
-                            prefix_ids=prefix_ids
-                        )
-                    for definition in defs:
-                        if 'id' not in definition:
-                            definitions.update(definition)
-                            continue
-                        def_id = definition.pop('id')
-                        if def_id is not None:
-                            definitions[def_id].update(definition)
-
-                operation = {}
-                if swag.get('summary'):
-                    operation['summary'] = swag.get('summary')
-                if swag.get('description'):
-                    operation['description'] = swag.get('description')
-                if responses:
-                    operation['responses'] = responses
-                # parameters - swagger ui dislikes empty parameter lists
-                if len(params) > 0:
-                    operation['parameters'] = params
-                # other optionals
-                for key in optional_fields:
-                    if key in swag:
-                        value = swag.get(key)
-                        if key in ('produces', 'consumes'):
-                            if not isinstance(value, (list, tuple)):
-                                value = [value]
-
-                        operation[key] = value
-                operations[verb] = operation
-
-            if len(operations):
-                srule = str(rule)
-                # old regex '(<(.*?\:)?(.*?)>)'
-                for arg in re.findall('(<([^<>]*:)?([^<>]*)>)', srule):
-                    srule = srule.replace(arg[0], '{%s}' % arg[2])
-
-                for key, val in operations.items():
-                    if key in paths[srule]:
-                        paths[srule][key].update(val)
-                    else:
-                        paths[srule][key] = val
-        return jsonify(data)
+        return jsonify(self.loader())
 
 
 class SwaggerDefinition(object):
@@ -290,10 +154,15 @@ class Swagger(object):
         "specs_route": "/apidocs/"
     }
 
+    SCHEMA_TYPES = {'string': str, 'integer': int, 'number': int,
+                    'boolean': bool, 'object': dict}
+    SCHEMA_LOCATIONS = {'query': 'args', 'header': 'headers',
+                        'formData': 'form', 'body': 'json', 'path': 'path'}
+
     def __init__(
             self, app=None, config=None, sanitizer=None, template=None,
             template_file=None, decorators=None, validation_function=None,
-            validation_error_handler=None):
+            validation_error_handler=None, parse=False):
         self._configured = False
         self.endpoints = []
         self.definition_models = []  # not in app, so track here
@@ -304,13 +173,16 @@ class Swagger(object):
         self.decorators = decorators
         self.validation_function = validation_function
         self.validation_error_handler = validation_error_handler
+        self.apispecs = {}  # cached apispecs
+        self.parse = parse
         if app:
             self.init_app(app)
 
-    def init_app(self, app):
+    def init_app(self, app, decorators=None):
         """
         Initialize the app with Swagger plugin
         """
+        self.decorators = decorators or self.decorators
         self.app = app
 
         self.load_config(app)
@@ -319,6 +191,15 @@ class Swagger(object):
             self.template = self.load_swagger_file(self.template_file)
         self.register_views(app)
         self.add_headers(app)
+
+        if self.parse:
+            if RequestParser is None:
+                raise RuntimeError('Please install flask_restful')
+            self.parsers = {}
+            self.schemas = {}
+            self.format_checker = jsonschema.FormatChecker()
+            self.parse_request(app)
+
         self._configured = True
         app.swag = self
 
@@ -351,6 +232,219 @@ class Swagger(object):
         """
         return self._configured
 
+    def get_url_mappings(self, rule_filter=None):
+        """
+        Returns all werkzeug rules
+        """
+        rule_filter = rule_filter or (lambda rule: True)
+        app_rules = [
+            rule for rule in current_app.url_map.iter_rules()
+            if rule_filter(rule)
+        ]
+        return app_rules
+
+    def get_def_models(self, definition_filter=None):
+        """
+        Used for class based definitions
+        """
+        model_filter = definition_filter or (lambda tag: True)
+        return {
+            definition.name: definition.obj
+            for definition in self.definition_models
+            if model_filter(definition)
+        }
+
+    def get_apispecs(self, endpoint='apispec_1'):
+        if not self.app.debug and endpoint in self.apispecs:
+            return self.apispecs[endpoint]
+
+        spec = None
+        for _spec in self.config['specs']:
+            if _spec['endpoint'] == endpoint:
+                spec = _spec
+                break
+        if not spec:
+            raise RuntimeError(
+                'Can`t find specs by endpoint {:d},'
+                ' check your flasger`s config'.format(endpoint))
+
+        data = {
+            # try to get from config['SWAGGER']['info']
+            # then config['SWAGGER']['specs'][x]
+            # then config['SWAGGER']
+            # then default
+            "info": self.config.get('info') or {
+                "version": spec.get(
+                    'version', self.config.get('version', "0.0.1")
+                ),
+                "title": spec.get(
+                    'title', self.config.get('title', "A swagger API")
+                ),
+                "description": spec.get(
+                    'description', self.config.get('description',
+                                                   "powered by Flasgger")
+                ),
+                "termsOfService": spec.get(
+                    'termsOfService', self.config.get('termsOfService',
+                                                      "/tos")
+                ),
+            },
+            "paths": self.config.get('paths') or defaultdict(dict),
+            "definitions": self.config.get('definitions') or defaultdict(dict)
+        }
+
+        openapi_version = self.config.get('openapi')
+        if openapi_version:
+            data["openapi"] = openapi_version
+        else:
+            data["swagger"] = self.config.get('swagger') or self.config.get(
+                'swagger_version', "2.0"
+            )
+
+        # Support extension properties in the top level config
+        top_level_extension_options = get_vendor_extension_fields(self.config)
+        if top_level_extension_options:
+            data.update(top_level_extension_options)
+
+        # if True schemaa ids will be prefized by function_method_{id}
+        # for backwards compatibility with <= 0.5.14
+        prefix_ids = self.config.get('prefix_ids')
+
+        if self.config.get('host'):
+            data['host'] = self.config.get('host')
+        if self.config.get("basePath"):
+            data["basePath"] = self.config.get('basePath')
+        if self.config.get('schemes'):
+            data['schemes'] = self.config.get('schemes')
+        if self.config.get("securityDefinitions"):
+            data["securityDefinitions"] = self.config.get(
+                'securityDefinitions'
+            )
+        # set defaults from template
+        if self.template is not None:
+            data.update(self.template)
+
+        paths = data['paths']
+        definitions = data['definitions']
+        ignore_verbs = set(
+            self.config.get('ignore_verbs', ("HEAD", "OPTIONS"))
+        )
+
+        # technically only responses is non-optional
+        optional_fields = self.config.get('optional_fields') or OPTIONAL_FIELDS
+
+        for name, def_model in self.get_def_models(
+                spec.get('definition_filter')).items():
+            description, swag = parse_definition_docstring(
+                def_model, self.sanitizer)
+            if name and swag:
+                if description:
+                    swag.update({'description': description})
+                definitions[name].update(swag)
+
+        specs = get_specs(
+            self.get_url_mappings(spec.get('rule_filter')), ignore_verbs,
+            optional_fields, self.sanitizer,
+            doc_dir=self.config.get('doc_dir'))
+
+        http_methods = ['get', 'post', 'put', 'delete']
+        for rule, verbs in specs:
+            operations = dict()
+            for verb, swag in verbs:
+                definitions.update(swag.get('definitions', {}))
+                defs = []  # swag.get('definitions', [])
+                defs += extract_definitions(
+                    defs, endpoint=rule.endpoint, verb=verb,
+                    prefix_ids=prefix_ids
+                )
+
+                params = swag.get('parameters', [])
+                if verb in swag.keys():
+                    verb_swag = swag.get(verb)
+                    if len(params) == 0 and verb.lower() in http_methods:
+                        params = verb_swag.get('parameters', [])
+
+                defs += extract_definitions(params,
+                                            endpoint=rule.endpoint,
+                                            verb=verb,
+                                            prefix_ids=prefix_ids)
+
+                request_body = swag.get('requestBody')
+                if request_body:
+                    content = request_body.get("content", {})
+                    extract_definitions(
+                        list(content.values()),
+                        endpoint=rule.endpoint,
+                        verb=verb,
+                        prefix_ids=prefix_ids
+                    )
+
+                responses = None
+                if 'responses' in swag:
+                    responses = swag.get('responses', {})
+                    responses = {
+                        str(key): value
+                        for key, value in responses.items()
+                    }
+                    if responses is not None:
+                        defs = defs + extract_definitions(
+                            responses.values(),
+                            endpoint=rule.endpoint,
+                            verb=verb,
+                            prefix_ids=prefix_ids
+                        )
+                    for definition in defs:
+                        if 'id' not in definition:
+                            definitions.update(definition)
+                            continue
+                        def_id = definition.pop('id')
+                        if def_id is not None:
+                            definitions[def_id].update(definition)
+
+                operation = {}
+                if swag.get('summary'):
+                    operation['summary'] = swag.get('summary')
+                if swag.get('description'):
+                    operation['description'] = swag.get('description')
+                if request_body:
+                    operation['requestBody'] = request_body
+                if responses:
+                    operation['responses'] = responses
+                # parameters - swagger ui dislikes empty parameter lists
+                if len(params) > 0:
+                    operation['parameters'] = params
+                # other optionals
+                for key in optional_fields:
+                    if key in swag:
+                        value = swag.get(key)
+                        if key in ('produces', 'consumes'):
+                            if not isinstance(value, (list, tuple)):
+                                value = [value]
+
+                        operation[key] = value
+                operations[verb] = operation
+
+            if len(operations):
+                try:
+                    # Add reverse proxy prefix to route
+                    prefix = self.template['swaggerUiPrefix']
+                except (KeyError, TypeError):
+                    prefix = ''
+                srule = '{0}{1}'.format(prefix, rule)
+                # old regex '(<(.*?\:)?(.*?)>)'
+                for arg in re.findall('(<([^<>]*:)?([^<>]*)>)', srule):
+                    srule = srule.replace(arg[0], '{%s}' % arg[2])
+
+                for key, val in operations.items():
+                    if srule not in paths:
+                        paths[srule] = {}
+                    if key in paths[srule]:
+                        paths[srule][key].update(val)
+                    else:
+                        paths[srule][key] = val
+        self.apispecs[endpoint] = data
+        return data
+
     def definition(self, name, tags=None):
         """
         Decorator to add class based definitions
@@ -380,7 +474,7 @@ class Swagger(object):
             return view
 
         if self.config.get('swagger_ui', True):
-            uiversion = self.config.get('uiversion', 2)
+            uiversion = self.config.get('uiversion', 3)
             blueprint = Blueprint(
                 self.config.get('endpoint', 'flasgger'),
                 __name__,
@@ -420,14 +514,10 @@ class Swagger(object):
             blueprint.add_url_rule(
                 spec['route'],
                 spec['endpoint'],
-                view_func=wrap_view(APISpecsView().as_view(
+                view_func=wrap_view(APISpecsView.as_view(
                     spec['endpoint'],
-                    view_args=dict(
-                        app=app, config=self.config,
-                        spec=spec, sanitizer=self.sanitizer,
-                        template=self.template,
-                        definition_models=self.definition_models
-                    )
+                    loader=partial(
+                        self.get_apispecs, endpoint=spec['endpoint'])
                 ))
             )
 
@@ -442,6 +532,90 @@ class Swagger(object):
             for header, value in self.config.get('headers'):
                 response.headers[header] = value
             return response
+
+    def parse_request(self, app):
+        @app.before_request
+        def before_request():  # noqa
+            # convert "/api/items/<int:id>/" to "/api/items/{id}/"
+            subs = []
+            for sub in str(request.url_rule).split('/'):
+                if '<' in sub:
+                    if ':' in sub:
+                        start = sub.index(':') + 1
+                    else:
+                        start = 1
+                    subs.append('{{{:s}}}'.format(sub[start:-1]))
+                else:
+                    subs.append(sub)
+            path = '/'.join(subs)
+            path_key = path + request.method.lower()
+
+            if not self.app.debug and path_key in self.parsers:
+                parsers = self.parsers[path_key]
+                schemas = self.schemas[path_key]
+            else:
+                doc = None
+                for spec in self.config['specs']:
+                    apispec = self.get_apispecs(endpoint=spec['endpoint'])
+                    if path in apispec['paths']:
+                        if request.method.lower() in apispec['paths'][path]:
+                            doc = apispec['paths'][path][
+                                request.method.lower()]
+                            break
+                if not doc:
+                    return
+
+                parsers = defaultdict(RequestParser)
+                schemas = defaultdict(
+                    lambda: {'type': 'object', 'properties': defaultdict(dict)}
+                )
+                for param in doc['parameters']:
+                    location = self.SCHEMA_LOCATIONS[param['in']]
+                    if location == 'json':
+                        schemas[location]['properties'].update(
+                            param['schema']['properties'])
+
+                        required_keys = param['schema'].get('required', [])
+                        keys = param['schema']['properties']
+                        for key in keys:
+                            parsers[location].add_argument(
+                                key,
+                                type=self.SCHEMA_TYPES[
+                                    keys[key]['type']],
+                                required=key in required_keys, location='json',
+                                store_missing=False)
+                    else:
+                        name = param['name']
+                        if location != 'path':
+                            parsers[location].add_argument(
+                                name,
+                                type=self.SCHEMA_TYPES[
+                                    param.get('type', None)],
+                                required=param.get('required', False),
+                                location=self.SCHEMA_LOCATIONS[
+                                    param['in']],
+                                store_missing=False)
+
+                        for k in param:
+                            if k != 'required':
+                                schemas[
+                                    location]['properties'][name][k] = param[k]
+
+                    self.schemas[path_key] = schemas
+                    self.parsers[path_key] = parsers
+
+            parsed_data = {'path': request.view_args}
+            for location in parsers.keys():
+                parsed_data[location] = parsers[location].parse_args()
+            for location, data in parsed_data.items():
+                try:
+                    jsonschema.validate(
+                        data, schemas[location],
+                        format_checker=self.format_checker)
+                except jsonschema.ValidationError as e:
+                    abort(Response(e.message, status=400))
+
+            setattr(request, 'parsed_data', parsed_data)
 
     def validate(
             self, schema_id, validation_function=None,
@@ -510,7 +684,8 @@ class Swagger(object):
         schema_specs = get_schema_specs(schema_id, self)
 
         if schema_specs is None:
-            raise KeyError('Specified schema_id \'{0}\' not found')
+            raise KeyError(
+                'Specified schema_id \'{0}\' not found'.format(schema_id))
 
         for schema in (
                 parameter.get('schema') for parameter in

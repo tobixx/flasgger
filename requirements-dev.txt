@@ -1,6 +1,6 @@
 # optional (for dev)
 marshmallow
-apispec
+apispec>=0.39.0
 flask-restful
 pep8==1.5.7
 flake8==2.4.1
@@ -10,6 +10,13 @@ coveralls
 pytest-cov
 decorator
 wheel
+flask-jwt
+twine>=1.11.0
+
+# for pypi markdown support
+readme_renderer
+setuptools>=40.4.2
 
 # install flasgger itself as editable
 -e .
+-e etc/flasgger_package

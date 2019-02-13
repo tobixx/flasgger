@@ -7,10 +7,12 @@ import flasgger
 
 try:
     from marshmallow import Schema, fields
-    from apispec.ext.marshmallow.swagger import (
-        schema2jsonschema, schema2parameters
-    )
+    from apispec.ext.marshmallow import openapi
     from apispec import APISpec as BaseAPISpec
+
+    openapi_converter = openapi.OpenAPIConverter(openapi_version='2.0')
+    schema2jsonschema = openapi_converter.schema2jsonschema
+    schema2parameters = openapi_converter.schema2parameters
 except ImportError:
     Schema = None
     fields = None
@@ -82,9 +84,16 @@ class SwaggerView(MethodView):
 def convert_schemas(d, definitions=None):
     """
     Convert Marshmallow schemas to dict definitions
+
+    Also updates the optional definitions argument with any definitions
+    entries contained within the schema.
     """
     if Schema is None:
         raise RuntimeError('Please install marshmallow and apispec')
+
+    if definitions is None:
+        definitions = {}
+    definitions.update(d.get('definitions', {}))
 
     new = {}
     for k, v in d.items():
@@ -111,6 +120,8 @@ def convert_schemas(d, definitions=None):
         else:
             new[k] = v
 
-        if k == 'definitions':
-            new['definitions'] = definitions
+    # This key is not permitted anywhere except the very top level.
+    if 'definitions' in new:
+        del new['definitions']
+
     return new

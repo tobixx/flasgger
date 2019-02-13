@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import codecs
 import copy
 import imp
 import inspect
@@ -20,6 +21,23 @@ from flask.views import MethodView
 from .constants import OPTIONAL_FIELDS
 from .marshmallow_apispec import SwaggerView
 from .marshmallow_apispec import convert_schemas
+
+
+def merge_specs(target, source):
+    """
+    Update target dictionary with values from the source, recursively.
+    List items will be merged.
+    """
+
+    for key, value in source.items():
+        if isinstance(value, dict):
+            node = target.setdefault(key, {})
+            merge_specs(node, value)
+        elif isinstance(value, list):
+            node = target.setdefault(key, [])
+            node.extend(value)
+        else:
+            target[key] = value
 
 
 def get_schema_specs(schema_id, swagger):
@@ -46,7 +64,7 @@ def get_schema_specs(schema_id, swagger):
                 return swag
 
 
-def get_specs(rules, ignore_verbs, optional_fields, sanitizer):
+def get_specs(rules, ignore_verbs, optional_fields, sanitizer, doc_dir=None):
 
     specs = []
     for rule in rules:
@@ -71,11 +89,11 @@ def get_specs(rules, ignore_verbs, optional_fields, sanitizer):
 
             klass = method.__dict__.get('view_class', None)
             if not is_mv and klass and hasattr(klass, 'verb'):
-                method = klass.__dict__.get('verb')
+                method = getattr(klass, 'verb', None)
             elif klass and hasattr(klass, 'dispatch_request'):
-                method = klass.__dict__.get('dispatch_request')
+                method = getattr(klass, 'dispatch_request', None)
             if method is None:  # for MethodView
-                method = klass.__dict__.get(verb)
+                method = getattr(klass, verb, None)
 
             if method is None:
                 if is_mv:  # #76 Empty MethodViews
@@ -86,6 +104,10 @@ def get_specs(rules, ignore_verbs, optional_fields, sanitizer):
 
             swag = {}
             swagged = False
+
+            if getattr(method, 'specs_dict', None):
+                merge_specs(swag, deepcopy(method.specs_dict))
+                swagged = True
 
             view_class = getattr(endpoint, 'view_class', None)
             if view_class and issubclass(view_class, SwaggerView):
@@ -103,18 +125,28 @@ def get_specs(rules, ignore_verbs, optional_fields, sanitizer):
                 swag.update(
                     convert_schemas(apispec_swag, apispec_definitions)
                 )
+                swag['definitions'] = apispec_definitions
 
                 swagged = True
 
-            if getattr(method, 'specs_dict', None):
-                swag.update(deepcopy(method.specs_dict))
-                swagged = True
+            if doc_dir:
+                if view_class:
+                    file_path = os.path.join(
+                        doc_dir, endpoint.__name__, method.__name__ + '.yml')
+                else:
+                    file_path = os.path.join(
+                        doc_dir, endpoint.__name__ + '.yml')
+                if os.path.isfile(file_path):
+                    func = method.__func__ \
+                        if hasattr(method, '__func__') else method
+                    setattr(func, 'swag_type', 'yml')
+                    setattr(func, 'swag_path', file_path)
 
             doc_summary, doc_description, doc_swag = parse_docstring(
                 method, sanitizer, endpoint=rule.endpoint, verb=verb)
 
             if doc_swag:
-                swag.update(doc_swag or {})
+                merge_specs(swag, doc_swag)
                 swagged = True
 
             if swagged:
@@ -388,7 +420,7 @@ def remove_suffix(fpath):  # pragma: no cover
 
 def is_python_file(fpath):  # pragma: no cover
     """Naive Python module filterer"""
-    return ".py" in fpath and "__" not in fpath
+    return fpath.endswith(".py") and "__" not in fpath
 
 
 def pathify(basenames, examples_dir="examples/"):  # pragma: no cover
@@ -434,7 +466,8 @@ def load_from_file(swag_path, swag_type='yml', root_path=None):
         # TODO: support JSON
 
     try:
-        with open(swag_path) as yaml_file:
+        enc = detect_by_bom(swag_path)
+        with codecs.open(swag_path, encoding=enc) as yaml_file:
             return yaml_file.read()
     except IOError:
         # not in the same dir, add dirname
@@ -442,7 +475,8 @@ def load_from_file(swag_path, swag_type='yml', root_path=None):
             root_path or os.path.dirname(__file__), swag_path
         )
         try:
-            with open(swag_path) as yaml_file:
+            enc = detect_by_bom(swag_path)
+            with codecs.open(swag_path, encoding=enc) as yaml_file:
                 return yaml_file.read()
         except IOError:  # pragma: no cover
             # if package dir
@@ -460,6 +494,18 @@ def load_from_file(swag_path, swag_type='yml', root_path=None):
                 return yaml_file.read()
 
 
+def detect_by_bom(path, default='utf-8'):
+    with open(path, 'rb') as f:
+        raw = f.read(4)  # will read less if the file is smaller
+    for enc, boms in \
+            ('utf-8-sig', (codecs.BOM_UTF8,)),\
+            ('utf-16', (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)),\
+            ('utf-32', (codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        if any(raw.startswith(bom) for bom in boms):
+            return enc
+    return default
+
+
 def parse_docstring(obj, process_doc, endpoint=None, verb=None):
     """
     Gets swag data for method/view docstring
@@ -471,14 +517,17 @@ def parse_docstring(obj, process_doc, endpoint=None, verb=None):
     swag_type = getattr(obj, 'swag_type', 'yml')
     swag_paths = getattr(obj, 'swag_paths', None)
     root_path = get_root_path(obj)
+    from_file = False
 
     if swag_path is not None:
         full_doc = load_from_file(swag_path, swag_type)
+        from_file = True
     elif swag_paths is not None:
         for key in ("{}_{}".format(endpoint, verb), endpoint, verb.lower()):
             if key in swag_paths:
                 full_doc = load_from_file(swag_paths[key], swag_type)
                 break
+        from_file = True
         # TODO: handle multiple root_paths
         # to support `import: ` from multiple places
     else:
@@ -492,22 +541,25 @@ def parse_docstring(obj, process_doc, endpoint=None, verb=None):
             swag_path, swag_type = get_path_from_doc(full_doc)
             doc_filepath = os.path.join(obj.root_path, swag_path)
             full_doc = load_from_file(doc_filepath, swag_type)
+            from_file = True
 
         full_doc = parse_imports(full_doc, root_path)
 
-        line_feed = full_doc.find('\n')
-        if line_feed != -1:
-            first_line = process_doc(full_doc[:line_feed])
-            yaml_sep = full_doc[line_feed + 1:].find('---')
-            if yaml_sep != -1:
+        yaml_sep = full_doc.find('---')
+
+        if yaml_sep != -1:
+            line_feed = full_doc.find('\n')
+            if line_feed != -1:
+                first_line = process_doc(full_doc[:line_feed])
                 other_lines = process_doc(
-                    full_doc[line_feed + 1: line_feed + yaml_sep]
+                    full_doc[line_feed + 1: yaml_sep]
                 )
-                swag = yaml.load(full_doc[line_feed + yaml_sep:])
-            else:
-                other_lines = process_doc(full_doc[line_feed + 1:])
+                swag = yaml.load(full_doc[yaml_sep + 4:])
         else:
-            first_line = full_doc
+            if from_file:
+                swag = yaml.load(full_doc)
+            else:
+                first_line = full_doc
 
     return first_line, other_lines, swag
 
